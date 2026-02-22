@@ -5,6 +5,8 @@ import { exchangeCodeForTokens, fetchGoogleUserProfile } from "@/lib/google-oaut
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecret";
 
+export const dynamic = "force-dynamic";
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const code = searchParams.get("code");

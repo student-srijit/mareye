@@ -4,8 +4,6 @@ import {
   Mail,
   Phone,
   MapPin,
-  Github,
-  ExternalLink,
   CheckCircle,
   AlertCircle,
   Send,
@@ -318,7 +316,7 @@ export function ContactSection() {
                       <Mail className="h-4 w-4 text-cyan-400/60 flex-shrink-0 group-hover:text-cyan-300 transition-colors" />
                       <div>
                         <div className="text-sm font-space-mono text-white/80 font-bold">
-                          aochuba52@gmail.com
+                          srijitd248@gmail.com
                         </div>
                         <div className="text-[10px] text-cyan-300/30 font-space-mono uppercase tracking-wider">
                           General Inquiries
@@ -342,44 +340,8 @@ export function ContactSection() {
               </div>
             </RevealSection>
 
-            <RevealSection delay={0.3}>
-              <div className="glass-card rounded-2xl p-6 relative overflow-hidden hover-glow transition-all duration-300">
-                <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-cyan-500/30" />
-                <div className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-cyan-500/30" />
-
-                <div className="relative z-10">
-                  <div className="flex items-center gap-3 mb-5">
-                    <div className="w-10 h-10 rounded-lg bg-cyan-500/10 border border-cyan-500/20 flex items-center justify-center">
-                      <Github className="w-5 h-5 text-cyan-400" />
-                    </div>
-                    <h3 className="text-base font-black text-cyan-100 font-orbitron tracking-wider">
-                      RESOURCES
-                    </h3>
-                  </div>
-
-                  <a
-                    href="https://github.com/Ao-chuba/MarEye-SIH/tree/enchance"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-3 p-3 bg-slate-800/40 rounded-lg border border-cyan-500/10 hover:border-cyan-500/30 transition-all duration-300 group hover-lift"
-                  >
-                    <Github className="h-5 w-5 text-cyan-400/60 group-hover:text-cyan-300 transition-colors" />
-                    <div className="flex-1">
-                      <div className="text-sm font-space-mono text-white/80 font-bold">
-                        Open Source Repository
-                      </div>
-                      <div className="text-[10px] text-cyan-300/30 font-space-mono uppercase tracking-wider">
-                        GitHub
-                      </div>
-                    </div>
-                    <ExternalLink className="h-4 w-4 text-cyan-400/30 group-hover:text-cyan-300 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-all" />
-                  </a>
-                </div>
-              </div>
-            </RevealSection>
-
             {/* Status Panel */}
-            <RevealSection delay={0.4}>
+            <RevealSection delay={0.3}>
               <div className="glass-card rounded-2xl p-6 relative overflow-hidden">
                 <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-emerald-500/30" />
                 <div className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-emerald-500/30" />

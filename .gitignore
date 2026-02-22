@@ -60,6 +60,7 @@ Thumbs.db
 temp/
 *.tmp
 *.temp
+_model_params.py
 
 # Model files - Now tracked in git
 # *.pt

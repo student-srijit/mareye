@@ -1,5 +1,5 @@
 # Stage 1: Build the application
-FROM node:18-alpine AS builder
+FROM node:18-bookworm-slim AS builder
 
 # Set working directory
 WORKDIR /app
@@ -17,23 +17,24 @@ COPY . .
 RUN npm run build
 
 # Stage 2: Create the production image with Python support
-FROM node:18-alpine
+FROM node:18-bookworm-slim
 
-# Install Python and build dependencies for ML libraries
-RUN apk add --no-cache \
+# Install Python and system dependencies for ML libraries
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
-    py3-pip \
+    python3-pip \
     python3-dev \
-    build-base \
+    build-essential \
     gcc \
     g++ \
     make \
     cmake \
     libffi-dev \
-    openblas-dev \
-    libjpeg-turbo-dev \
-    zlib-dev \
-    && ln -sf python3 /usr/bin/python
+    libopenblas-dev \
+    libjpeg62-turbo-dev \
+    zlib1g-dev \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
 
 # Set working directory
 WORKDIR /app

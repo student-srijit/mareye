@@ -8,6 +8,7 @@ interface User {
   firstName?: string
   lastName?: string
   avatar?: string
+  isHoneypotAdmin?: boolean
 }
 
 export function useAuth() {
@@ -58,7 +59,8 @@ export function useAuth() {
               email: data.user.email,
               firstName: data.user.firstName,
               lastName: data.user.lastName,
-              avatar: data.user.avatar
+              avatar: data.user.avatar,
+              isHoneypotAdmin: Boolean(data.user.isHoneypotAdmin)
             }
             setUser(userData)
             // Store user data in localStorage for future use

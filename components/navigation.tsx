@@ -18,10 +18,6 @@ import {
   Home,
   MessageSquare,
   Globe,
-  Crosshair,
-  Bomb,
-  Telescope,
-  Globe2,
   Map,
   Activity,
 } from "lucide-react";
@@ -37,6 +33,7 @@ export function Navigation() {
   const pathname = usePathname();
   const router = useRouter();
   const { user: userData, logout } = useAuth();
+  const isSecurityAdmin = Boolean(userData?.isHoneypotAdmin);
 
   const navItems = [
     { href: "/", label: "Home", icon: Home },
@@ -44,14 +41,14 @@ export function Navigation() {
     { href: "/detection", label: "Detection", icon: Target },
     { href: "/command-center", label: "Command", icon: Radar },
     { href: "/intelligence", label: "Intel", icon: Globe },
-    { href: "/combat", label: "Combat", icon: Crosshair },
-    { href: "/launch", label: "Launch", icon: Bomb },
-    { href: "/periscope", label: "Periscope", icon: Telescope },
-    { href: "/war-room", label: "War Room", icon: Globe2 },
     { href: "/mission-planner", label: "Planner", icon: Map },
     { href: "/threat-prediction", label: "Threats", icon: Activity },
     { href: "/analytics", label: "Analytics", icon: BarChart3 },
   ];
+
+  const visibleNavItems = isSecurityAdmin
+    ? [...navItems, { href: "/security/honeypot", label: "Honeypot", icon: Shield }]
+    : navItems;
 
   // Scroll-aware navbar
   useEffect(() => {
@@ -139,7 +136,7 @@ export function Navigation() {
                   }}
                 />
 
-                {navItems.map((item) => {
+                {visibleNavItems.map((item) => {
                   const isActive = pathname === item.href;
                   const Icon = item.icon;
                   return (
@@ -300,7 +297,7 @@ export function Navigation() {
             }`}
           >
             <div className="px-3 pt-3 pb-5 space-y-1.5 border-t border-cyan-500/10">
-              {navItems.map((item, index) => {
+              {visibleNavItems.map((item, index) => {
                 const isActive = pathname === item.href;
                 const Icon = item.icon;
                 return (

@@ -5,7 +5,7 @@ import L from "leaflet";
 import {
   Navigation, Crosshair, Anchor, Radio, Shield, AlertTriangle, Target,
   MapPin, Play, Pause, Trash2, Settings, Globe2, Activity, RefreshCw, Radar,
-  Eye, EyeOff, Layers, Waves, Wind, Zap, ChevronDown,
+  Eye, EyeOff, Layers, Waves, Wind, Zap, ChevronDown, Brain, Route,
 } from "lucide-react";
 
 // ═══════════════════════════════════════════════════════════
@@ -191,6 +191,7 @@ export function TacticalMissionPlanner() {
   const eezLayersRef = useRef<L.LayerGroup | null>(null);
   const wpLayersRef = useRef<L.LayerGroup | null>(null);
   const tileLayerRef = useRef<L.TileLayer | null>(null);
+  const aiPathLayerRef = useRef<L.LayerGroup | null>(null);
 
   const [intel, setIntel] = useState<IntelResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -207,6 +208,14 @@ export function TacticalMissionPlanner() {
   const [showThreats, setShowThreats] = useState(true);
   const [tileType, setTileType] = useState<keyof typeof TILE_LAYERS>("topo");
   const [cursorPos, setCursorPos] = useState<{lat: number; lng: number} | null>(null);
+
+  // ── AI Path Planner state ──
+  const [aiPlanLoading, setAiPlanLoading] = useState(false);
+  const [aiPathStats, setAiPathStats] = useState<any | null>(null);
+  const [aiPathError, setAiPathError] = useState<string | null>(null);
+  const [showAiPath, setShowAiPath] = useState(true);
+  const [showAiAnalysis, setShowAiAnalysis] = useState(true);
+  const [simOnAiPath, setSimOnAiPath] = useState(false);
 
   // ── Fetch intel ──
   const fetchIntel = useCallback(async () => {
@@ -319,6 +328,7 @@ export function TacticalMissionPlanner() {
     shippingLayersRef.current = L.layerGroup().addTo(map);
     eezLayersRef.current = L.layerGroup().addTo(map);
     wpLayersRef.current = L.layerGroup().addTo(map);
+    aiPathLayerRef.current = L.layerGroup().addTo(map);
 
     // Cursor position tracking
     map.on("mousemove", (e: L.LeafletMouseEvent) => {
@@ -580,52 +590,115 @@ export function TacticalMissionPlanner() {
   }, [waypoints, selectedWp, legThreats]);
 
   // ── Simulation ──
+  // Resolve which path points to use for simulation
+  const simPath: [number, number][] = useMemo(() => {
+    if (simOnAiPath && aiPathStats?.waypoints?.length >= 2) {
+      return aiPathStats.waypoints.map((w: number[]) => [w[0], w[1]] as [number, number]);
+    }
+    return waypoints.map(wp => [wp.lat, wp.lng] as [number, number]);
+  }, [simOnAiPath, aiPathStats, waypoints]);
+
+  // Compute cumulative distances for accurate speed-based simulation
+  const simDistances = useMemo(() => {
+    if (simPath.length < 2) return { cumDist: [], totalDist: 0 };
+    const cumDist = [0];
+    let total = 0;
+    for (let i = 1; i < simPath.length; i++) {
+      const d = L.latLng(simPath[i - 1][0], simPath[i - 1][1]).distanceTo(L.latLng(simPath[i][0], simPath[i][1]));
+      total += d;
+      cumDist.push(total);
+    }
+    return { cumDist, totalDist: total };
+  }, [simPath]);
+
   useEffect(() => {
-    if (!simulating || waypoints.length < 2) return;
+    if (!simulating || simPath.length < 2) return;
     const iv = setInterval(() => {
       setSimProgress(p => {
-        if (p >= 1) { setSimulating(false); return 0; }
+        if (p >= 1) { setSimulating(false); setSimOnAiPath(false); return 0; }
         return p + 0.002;
       });
     }, 50);
     return () => clearInterval(iv);
-  }, [simulating, waypoints.length]);
+  }, [simulating, simPath.length]);
 
-  // Sim marker movement
+  // Sim marker movement — works for both manual waypoints and AI path
   useEffect(() => {
     if (!mapRef.current) return;
 
-    // Clear old sim markers
     if (simMarkerRef.current) { mapRef.current.removeLayer(simMarkerRef.current); simMarkerRef.current = null; }
     if (simTrailRef.current) { mapRef.current.removeLayer(simTrailRef.current); simTrailRef.current = null; }
 
-    if (!simulating || waypoints.length < 2) return;
+    if (!simulating || simPath.length < 2) return;
 
-    const total = waypoints.length - 1;
-    const legIdx = Math.min(Math.floor(simProgress * total), total - 1);
-    const legProg = simProgress * total - legIdx;
-    const lat = waypoints[legIdx].lat + (waypoints[legIdx + 1].lat - waypoints[legIdx].lat) * legProg;
-    const lng = waypoints[legIdx].lng + (waypoints[legIdx + 1].lng - waypoints[legIdx].lng) * legProg;
+    const { cumDist, totalDist } = simDistances;
+    const targetDist = simProgress * totalDist;
+
+    // Find which leg we're on based on actual distance
+    let legIdx = 0;
+    for (let i = 1; i < cumDist.length; i++) {
+      if (cumDist[i] >= targetDist) { legIdx = i - 1; break; }
+      if (i === cumDist.length - 1) legIdx = i - 1;
+    }
+
+    const legStart = cumDist[legIdx];
+    const legLen = cumDist[legIdx + 1] - legStart;
+    const legProg = legLen > 0 ? (targetDist - legStart) / legLen : 0;
+
+    const lat = simPath[legIdx][0] + (simPath[legIdx + 1][0] - simPath[legIdx][0]) * legProg;
+    const lng = simPath[legIdx][1] + (simPath[legIdx + 1][1] - simPath[legIdx][1]) * legProg;
+
+    // Compute bearing for ship heading
+    const nextLat = simPath[Math.min(legIdx + 1, simPath.length - 1)][0];
+    const nextLng = simPath[Math.min(legIdx + 1, simPath.length - 1)][1];
+    const dLng = ((nextLng - lng) * Math.PI) / 180;
+    const lat1R = (lat * Math.PI) / 180;
+    const lat2R = (nextLat * Math.PI) / 180;
+    const bearing = (Math.atan2(Math.sin(dLng) * Math.cos(lat2R), Math.cos(lat1R) * Math.sin(lat2R) - Math.sin(lat1R) * Math.cos(lat2R) * Math.cos(dLng)) * 180) / Math.PI;
+
+    // Determine risk color at current position
+    const isAiSim = simOnAiPath && aiPathStats;
+    const riskSegs = aiPathStats?.stats?.risk_segments ?? [];
+    let currentRisk = "low";
+    if (isAiSim && riskSegs.length > 0 && legIdx < riskSegs.length) {
+      currentRisk = riskSegs[legIdx]?.risk ?? "low";
+    }
+    const riskColorMap: Record<string, string> = { low: "#10b981", medium: "#eab308", high: "#f97316", critical: "#ef4444", LOW: "#10b981", MEDIUM: "#eab308", HIGH: "#f97316", CRITICAL: "#ef4444" };
+    const shipColor = isAiSim ? (riskColorMap[currentRisk] ?? "#f59e0b") : "#10b981";
 
     // Trail (completed path)
     const trailPts: [number, number][] = [];
-    for (let i = 0; i <= legIdx; i++) trailPts.push([waypoints[i].lat, waypoints[i].lng]);
+    for (let i = 0; i <= legIdx; i++) trailPts.push(simPath[i]);
     trailPts.push([lat, lng]);
-    simTrailRef.current = L.polyline(trailPts, { color: "#10b981", weight: 3, opacity: 0.6 }).addTo(mapRef.current);
+    simTrailRef.current = L.polyline(trailPts, { color: shipColor, weight: 3, opacity: 0.6 }).addTo(mapRef.current);
 
-    // Ship marker
+    // Ship marker with heading arrow
     simMarkerRef.current = L.marker([lat, lng], {
       icon: L.divIcon({
         className: "",
-        iconSize: [20, 20],
-        iconAnchor: [10, 10],
-        html: `<div style="width:20px;height:20px;background:#10b981;border-radius:50%;box-shadow:0 0 12px #10b98188,0 0 24px #10b98144;border:2px solid #10b981;display:flex;align-items:center;justify-content:center">
-          <div style="width:6px;height:6px;background:#fff;border-radius:50%"></div>
+        iconSize: [28, 28],
+        iconAnchor: [14, 14],
+        html: `<div style="width:28px;height:28px;position:relative;transform:rotate(${bearing}deg)">
+          <div style="position:absolute;inset:0;background:${shipColor}33;border-radius:50%;box-shadow:0 0 16px ${shipColor}66,0 0 32px ${shipColor}22;animation:pulse 1.5s infinite"></div>
+          <div style="position:absolute;inset:4px;background:${shipColor};border-radius:50%;border:2px solid #fff;display:flex;align-items:center;justify-content:center">
+            <div style="width:0;height:0;border-left:4px solid transparent;border-right:4px solid transparent;border-bottom:6px solid #fff;margin-top:-2px"></div>
+          </div>
         </div>`,
       }),
       zIndexOffset: 2000,
     }).addTo(mapRef.current);
-  }, [simulating, simProgress, waypoints]);
+
+    // Add ship info tooltip
+    const distCovered = (targetDist / 1852).toFixed(0);
+    const distTotal = (totalDist / 1852).toFixed(0);
+    simMarkerRef.current.bindTooltip(`
+      <div style="font-family:monospace;font-size:8px">
+        <div style="color:${shipColor};font-weight:bold">${isAiSim ? "AI NAV" : "MANUAL"} — ${missionProfile.vessel.split("(")[0].trim()}</div>
+        <div style="color:#94a3b8">${distCovered} / ${distTotal} nm</div>
+        <div style="color:${shipColor}">${currentRisk.toUpperCase()} RISK</div>
+      </div>
+    `, { className: "tactical-tooltip", direction: "top", permanent: true, offset: [0, -18] });
+  }, [simulating, simProgress, simPath, simDistances, simOnAiPath, aiPathStats, missionProfile]);
 
   // ── Actions ──
   const deleteWp = (id: string) => {
@@ -634,10 +707,104 @@ export function TacticalMissionPlanner() {
   };
   const clearRoute = () => {
     setWaypoints([]); setSelectedWp(null); setSimulating(false); setSimProgress(0);
+    setAiPathStats(null); setAiPathError(null);
+    aiPathLayerRef.current?.clearLayers();
   };
   const centerOnIndia = () => {
     mapRef.current?.flyTo([12, 78], 5, { duration: 1.5 });
   };
+
+  // ── AI Path Planning ──
+  const planAiPath = useCallback(async () => {
+    if (waypoints.length < 2) return;
+    const start = waypoints[0];
+    const goal = waypoints[waypoints.length - 1];
+    setAiPlanLoading(true);
+    setAiPathError(null);
+    setAiPathStats(null);
+    aiPathLayerRef.current?.clearLayers();
+
+    try {
+      const now = new Date();
+      const body = {
+        start: { lat: start.lat, lng: start.lng },
+        goal:  { lat: goal.lat,  lng: goal.lng },
+        threat_zones: threatZones.map(z => ({
+          lat: z.lat, lon: z.lon, radius: z.radius, threatLevel: z.threatLevel,
+        })),
+        vessel_speed: missionProfile.speed,
+        utc_hour: now.getUTCHours(),
+        month: now.getUTCMonth() + 1,
+      };
+
+      const res = await fetch("/api/mission/plan-path", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) throw new Error(`API error ${res.status}`);
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || "Planner failed");
+
+      setAiPathStats(data);
+
+      // Draw AI path on map
+      if (aiPathLayerRef.current && mapRef.current) {
+        const layer = aiPathLayerRef.current;
+        layer.clearLayers();
+
+        const riskColors: Record<string, string> = {
+          low: "#10b981", medium: "#eab308", high: "#f97316", critical: "#ef4444",
+        };
+
+        // Draw risk-coloured segments
+        const segs = data.stats?.risk_segments ?? [];
+        if (segs.length > 0) {
+          segs.forEach((seg: any) => {
+            const c = riskColors[seg.risk] ?? "#f59e0b";
+            L.polyline([[seg.from[0], seg.from[1]], [seg.to[0], seg.to[1]]], {
+              color: c, weight: 4, opacity: 0.85,
+            }).addTo(layer);
+          });
+        } else {
+          // fallback: plain orange line
+          const latlngs: [number, number][] = data.waypoints.map((w: number[]) => [w[0], w[1]]);
+          L.polyline(latlngs, { color: "#f59e0b", weight: 4, opacity: 0.8, dashArray: "1,0" }).addTo(layer);
+        }
+
+        // Start / goal markers on AI path
+        const svgMarker = (label: string, color: string) => L.divIcon({
+          className: "",
+          iconSize: [28, 28],
+          iconAnchor: [14, 14],
+          html: `<div style="width:28px;height:28px;border-radius:50%;background:${color}33;border:2.5px solid ${color};box-shadow:0 0 10px ${color}66;display:flex;align-items:center;justify-content:center;color:${color};font-size:9px;font-family:'Orbitron',monospace;font-weight:bold">${label}</div>`,
+        });
+
+        L.marker([start.lat, start.lng], { icon: svgMarker("S", "#10b981"), zIndexOffset: 1500 })
+          .bindTooltip("AI PATH START", { className: "tactical-tooltip", direction: "top" })
+          .addTo(layer);
+        L.marker([goal.lat, goal.lng], { icon: svgMarker("G", "#ef4444"), zIndexOffset: 1500 })
+          .bindTooltip("AI PATH GOAL", { className: "tactical-tooltip", direction: "top" })
+          .addTo(layer);
+
+        // Waypoint dots
+        data.waypoints.forEach((w: number[], i: number) => {
+          if (i === 0 || i === data.waypoints.length - 1) return;
+          if (i % 3 !== 0) return; // show every 3rd
+          L.circleMarker([w[0], w[1]], { radius: 2.5, color: "#f59e0b", fillColor: "#f59e0b", fillOpacity: 0.7, weight: 1 }).addTo(layer);
+        });
+
+        // Zoom to fit
+        const latlngs: L.LatLngExpression[] = data.waypoints.map((w: number[]) => [w[0], w[1]] as [number, number]);
+        mapRef.current.fitBounds(L.latLngBounds(latlngs), { padding: [40, 40], maxZoom: 7, animate: true });
+      }
+    } catch (err: any) {
+      setAiPathError(err.message ?? "Unknown error");
+    } finally {
+      setAiPlanLoading(false);
+    }
+  }, [waypoints, threatZones, missionProfile]);
 
   const fuelPct = missionProfile.fuelCapacity > 0 && missionProfile.fuelCapacity < 999999
     ? Math.min(100, (routeStats.fuel / missionProfile.fuelCapacity) * 100) : 0;
@@ -730,13 +897,42 @@ export function TacticalMissionPlanner() {
               </div>
 
               {/* Sim controls */}
-              <div className="absolute bottom-3 left-3 flex gap-2 z-[1000]">
+              <div className="absolute bottom-3 left-3 flex flex-wrap gap-1.5 z-[1000]">
                 <button disabled={waypoints.length < 2}
-                  onClick={() => { setSimulating(!simulating); if (!simulating) setSimProgress(0); }}
+                  onClick={() => { setSimOnAiPath(false); setSimulating(!simulating); if (!simulating) setSimProgress(0); }}
                   className="flex items-center gap-1 px-2.5 py-1 rounded text-[7px] font-orbitron bg-slate-900/70 text-emerald-400 border border-emerald-500/20 disabled:opacity-30 hover:bg-emerald-500/10 backdrop-blur-sm transition-all">
-                  {simulating ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
-                  {simulating ? "PAUSE" : "SIMULATE"}
+                  {simulating && !simOnAiPath ? <Pause className="w-3 h-3" /> : <Play className="w-3 h-3" />}
+                  {simulating && !simOnAiPath ? "PAUSE" : "SIMULATE"}
                 </button>
+                <button
+                  disabled={waypoints.length < 2 || aiPlanLoading}
+                  onClick={planAiPath}
+                  className="flex items-center gap-1 px-2.5 py-1 rounded text-[7px] font-orbitron bg-slate-900/70 text-amber-400 border border-amber-500/25 disabled:opacity-30 hover:bg-amber-500/10 backdrop-blur-sm transition-all">
+                  {aiPlanLoading
+                    ? <><Radar className="w-3 h-3 animate-spin" /> PLANNING…</>
+                    : <><Brain className="w-3 h-3" /> AI PLAN PATH</>}
+                </button>
+                {aiPathStats && (
+                  <>
+                    <button
+                      onClick={() => { setSimOnAiPath(true); setSimProgress(0); setSimulating(true); }}
+                      disabled={simulating && simOnAiPath}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded text-[7px] font-orbitron bg-slate-900/70 text-amber-400 border border-amber-500/25 disabled:opacity-30 hover:bg-amber-500/10 backdrop-blur-sm transition-all">
+                      {simulating && simOnAiPath ? <><Radar className="w-3 h-3 animate-spin" /> AI SIM…</> : <><Play className="w-3 h-3" /> SIM AI ROUTE</>}
+                    </button>
+                    <button
+                      onClick={() => { setShowAiPath(p => !p); aiPathLayerRef.current?.eachLayer((l: any) => { showAiPath ? mapRef.current?.removeLayer(l) : aiPathLayerRef.current?.addLayer(l); }); }}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded text-[7px] font-orbitron bg-slate-900/70 text-amber-300 border border-amber-500/15 hover:bg-amber-500/10 backdrop-blur-sm transition-all">
+                      <Route className="w-3 h-3" /> {showAiPath ? "HIDE PATH" : "SHOW PATH"}
+                    </button>
+                  </>
+                )}
+                {simulating && (
+                  <button onClick={() => { setSimulating(false); setSimProgress(0); setSimOnAiPath(false); }}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded text-[7px] font-orbitron bg-slate-900/70 text-red-400 border border-red-500/20 hover:bg-red-500/10 backdrop-blur-sm transition-all">
+                    <Pause className="w-3 h-3" /> STOP
+                  </button>
+                )}
                 <button onClick={clearRoute}
                   className="flex items-center gap-1 px-2.5 py-1 rounded text-[7px] font-orbitron bg-slate-900/70 text-red-400 border border-red-500/20 hover:bg-red-500/10 backdrop-blur-sm transition-all">
                   <Trash2 className="w-3 h-3" /> CLEAR
@@ -745,11 +941,19 @@ export function TacticalMissionPlanner() {
 
               {/* Sim progress bar */}
               {simulating && (
-                <div className="absolute bottom-3 left-1/2 -translate-x-1/2 bg-slate-900/85 border border-emerald-500/20 rounded-lg px-4 py-2 z-[1000] backdrop-blur-sm">
-                  <div className="text-[7px] font-orbitron text-emerald-400 mb-1">MISSION SIMULATION — {Math.round(simProgress * 100)}%</div>
-                  <div className="w-40 h-1.5 bg-slate-800 rounded-full">
-                    <div className="h-full bg-emerald-500 rounded-full transition-all" style={{ width: `${simProgress * 100}%` }} />
+                <div className="absolute bottom-14 left-1/2 -translate-x-1/2 bg-slate-900/85 border border-emerald-500/20 rounded-lg px-4 py-2 z-[1000] backdrop-blur-sm min-w-[240px]">
+                  <div className={`text-[7px] font-orbitron mb-1 ${simOnAiPath ? "text-amber-400" : "text-emerald-400"}`}>
+                    {simOnAiPath ? "AI ROUTE SIMULATION" : "MANUAL ROUTE SIMULATION"} — {Math.round(simProgress * 100)}%
                   </div>
+                  <div className="w-full h-1.5 bg-slate-800 rounded-full">
+                    <div className={`h-full rounded-full transition-all ${simOnAiPath ? "bg-amber-500" : "bg-emerald-500"}`} style={{ width: `${simProgress * 100}%` }} />
+                  </div>
+                  {simOnAiPath && aiPathStats && (
+                    <div className="flex justify-between text-[6px] font-space-mono text-slate-500 mt-1">
+                      <span>{Math.round((aiPathStats.stats?.total_km ?? 0) * simProgress)} / {aiPathStats.stats?.total_km} km</span>
+                      <span>{missionProfile.vessel.split("(")[0].trim()} @ {missionProfile.speed}kn</span>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -768,6 +972,75 @@ export function TacticalMissionPlanner() {
                 <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-cyan-500/15" />
                 <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-cyan-500/15" />
                 <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-cyan-500/15" />
+              </div>
+            </div>
+
+            {/* ── AI MODEL EXPLAINER (fills space below map) ── */}
+            <div className="mt-3 bg-slate-900/40 border border-cyan-500/10 rounded-xl p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Brain className="w-4 h-4 text-amber-400" />
+                <span className="text-[10px] font-orbitron text-amber-400 tracking-[0.15em]">HOW AI PATH PLANNING WORKS</span>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                {[
+                  {
+                    step: "01",
+                    title: "COST GRID",
+                    desc: "DynCostNet (32-feature Residual MLP) evaluates every cell in a 140×180 grid covering the Indian Ocean. Each cell gets a traversal cost based on threat proximity, weather, time, and season.",
+                    color: "#f59e0b",
+                    icon: "🧠",
+                  },
+                  {
+                    step: "02",
+                    title: "LAND MASKING",
+                    desc: "Polygon-based coastline detection marks land cells as impassable (cost=1.0). Uses ray-casting on real coastline coordinates for India, Sri Lanka, Arabia, Myanmar, and more.",
+                    color: "#ef4444",
+                    icon: "🗺️",
+                  },
+                  {
+                    step: "03",
+                    title: "A* PATHFINDING",
+                    desc: "8-directional A* search finds the minimum-cost path from start to goal. Cells above 0.985 cost are blocked. The algorithm balances distance with threat avoidance.",
+                    color: "#06b6d4",
+                    icon: "📍",
+                  },
+                  {
+                    step: "04",
+                    title: "ROUTE SMOOTHING",
+                    desc: "Catmull-Rom spline interpolation smooths the grid path into natural waypoints. Risk segments are computed with haversine distance and per-segment cost analysis.",
+                    color: "#10b981",
+                    icon: "🛳️",
+                  },
+                ].map(s => (
+                  <div key={s.step} className="bg-slate-800/30 border rounded-lg p-3" style={{ borderColor: `${s.color}20` }}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-sm">{s.icon}</span>
+                      <div>
+                        <span className="text-[7px] font-orbitron tracking-wide" style={{ color: s.color }}>STEP {s.step}</span>
+                        <div className="text-[8px] font-orbitron text-slate-300">{s.title}</div>
+                      </div>
+                    </div>
+                    <p className="text-[7px] font-space-mono text-slate-500 leading-relaxed">{s.desc}</p>
+                  </div>
+                ))}
+              </div>
+              {/* Feature list */}
+              <div className="mt-3 grid grid-cols-2 md:grid-cols-4 gap-2">
+                {[
+                  { label: "Input Features", value: "32-dim vector", color: "text-amber-400" },
+                  { label: "Architecture", value: "Residual MLP (256h)", color: "text-amber-400" },
+                  { label: "Grid Resolution", value: "140×180 cells", color: "text-cyan-400" },
+                  { label: "Coverage", value: "5°S–30°N, 55°E–100°E", color: "text-cyan-400" },
+                  { label: "Threat Factors", value: "Proximity + density", color: "text-red-400" },
+                  { label: "Weather Inputs", value: "Sea state, wind, vis", color: "text-blue-400" },
+                  { label: "Temporal", value: "Hour + season encoded", color: "text-emerald-400" },
+                  { label: "Geographic", value: "EEZ, lanes, chokepoints", color: "text-emerald-400" },
+                ].map(f => (
+                  <div key={f.label} className="flex justify-between text-[7px] font-space-mono bg-slate-800/20 rounded px-2 py-1.5">
+                    <span className="text-slate-500">{f.label}</span>
+                    <span className={f.color}>{f.value}</span>
+                  </div>
+                ))}
               </div>
             </div>
           </div>
@@ -929,6 +1202,74 @@ export function TacticalMissionPlanner() {
               )}
             </div>
 
+            {/* AI Path Stats */}
+            {(aiPlanLoading || aiPathStats || aiPathError) && (
+              <div className="bg-slate-900/60 border border-amber-500/20 rounded-xl p-3">
+                <div className="flex items-center gap-2 mb-2.5">
+                  <Brain className="w-3.5 h-3.5 text-amber-400" />
+                  <span className="text-[10px] font-orbitron text-amber-400 tracking-wider">AI PATH PLANNER</span>
+                  {aiPlanLoading && <Radar className="w-3 h-3 text-amber-400 animate-spin ml-auto" />}
+                </div>
+                {aiPlanLoading && (
+                  <div className="space-y-1">
+                    {["Building cost grid…", "Running A* search…", "Smoothing route…"].map((s, i) => (
+                      <div key={i} className="flex items-center gap-2 text-[7px] font-space-mono text-amber-400/50">
+                        <div className="w-1 h-1 rounded-full bg-amber-400 animate-pulse" style={{ animationDelay: `${i * 0.2}s` }} />
+                        {s}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                {aiPathError && (
+                  <div className="text-[8px] font-space-mono text-red-400 bg-red-500/5 border border-red-500/15 rounded p-2">
+                    ⚠ {aiPathError}
+                  </div>
+                )}
+                {aiPathStats && !aiPlanLoading && (
+                  <div className="space-y-2">
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {[
+                        { label: "DISTANCE", value: `${aiPathStats.stats?.total_km} km` },
+                        { label: "ETA", value: aiPathStats.stats?.eta },
+                        { label: "WAYPOINTS", value: aiPathStats.waypoints?.length },
+                        { label: "PEAK THREAT", value: aiPathStats.stats?.peak_threat },
+                      ].map(s => (
+                        <div key={s.label} className="bg-amber-500/5 border border-amber-500/10 rounded p-1.5 text-center">
+                          <div className="text-[10px] font-orbitron text-amber-400">{s.value ?? "—"}</div>
+                          <div className="text-[6px] font-space-mono text-slate-600 mt-0.5">{s.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="text-[7px] font-space-mono space-y-0.5">
+                      <div className="flex justify-between text-slate-500">
+                        <span>Season</span>
+                        <span className="text-amber-300/70">{aiPathStats.context?.season ?? "—"}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-500">
+                        <span>Sea State</span>
+                        <span className="text-amber-300/70">{aiPathStats.weather?.sea_state ?? "—"} ({aiPathStats.weather?.wave_height ?? "—"}m)</span>
+                      </div>
+                      <div className="flex justify-between text-slate-500">
+                        <span>Model</span>
+                        <span className={`text-[6px] font-orbitron px-1 py-0.5 rounded ${aiPathStats.model_used === "dyn_cost_net" ? "bg-amber-500/20 text-amber-400" : "bg-slate-700 text-slate-400"}`}>
+                          {aiPathStats.model_used === "dyn_cost_net" ? "NEURAL NET" : "EXPERT RULES"}
+                        </span>
+                      </div>
+                    </div>
+                    {/* Risk segments mini-legend */}
+                    <div className="flex gap-1.5 flex-wrap">
+                      {[["low","#10b981"],["medium","#eab308"],["high","#f97316"],["critical","#ef4444"]].map(([r,c]) => (
+                        <div key={r} className="flex items-center gap-1 text-[6px] font-space-mono" style={{ color: c as string }}>
+                          <div className="w-4 h-0.5 rounded-full" style={{ backgroundColor: c as string }} />
+                          {(r as string).toUpperCase()}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Sea State */}
             {intel && (
               <div className="bg-slate-900/60 border border-cyan-500/15 rounded-xl p-3">
@@ -951,30 +1292,563 @@ export function TacticalMissionPlanner() {
               </div>
             )}
 
-            {/* Intel Brief */}
-            {intel?.brief && (
-              <div className="bg-slate-900/60 border border-cyan-500/15 rounded-xl p-3">
-                <div className="flex items-center gap-2 mb-2">
-                  <Globe2 className="w-3.5 h-3.5 text-cyan-400" />
-                  <span className="text-[10px] font-orbitron text-cyan-400 tracking-wider">INTEL BRIEF</span>
+          </div>
+        </div>
+
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* AI ROUTE ANALYSIS — BELOW MAP                              */}
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {aiPathStats && (
+          <div className="mt-1">
+            {/* ── TOGGLE HEADER ── */}
+            <button onClick={() => setShowAiAnalysis(p => !p)}
+              className="w-full flex items-center justify-between bg-slate-900/80 border border-amber-500/25 rounded-xl px-5 py-3.5 hover:bg-amber-950/20 transition-all"
+              style={showAiAnalysis ? { borderBottomLeftRadius: 0, borderBottomRightRadius: 0 } : {}}>
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-md bg-amber-500/15 border border-amber-500/25 flex items-center justify-center flex-shrink-0">
+                  <Brain className="w-4 h-4 text-amber-400" />
                 </div>
-                <p className="text-[8px] font-space-mono text-slate-500 leading-relaxed">{intel.brief}</p>
-                <div className="mt-2 pt-2 border-t border-slate-800/30 grid grid-cols-2 gap-1">
-                  <div className="text-center">
-                    <div className={`text-sm font-orbitron ${(intel.summary.avgThreat || 0) >= 50 ? "text-red-400" : "text-emerald-400"}`}>{intel.summary.avgThreat}%</div>
-                    <div className="text-[6px] font-space-mono text-slate-600">AVG THREAT</div>
+                <div>
+                  <div className="text-[11px] font-orbitron text-amber-400 tracking-[0.15em] text-left">AI ROUTE ANALYSIS</div>
+                  <div className="text-[7px] font-space-mono text-slate-500 text-left mt-0.5">
+                    DynCostNet · {aiPathStats.model_used === "dyn_cost_net" ? "32-Feature Deep Residual MLP" : "Expert Cost Rules"}
                   </div>
-                  <div className="text-center">
-                    <div className="text-sm font-orbitron text-emerald-400">{intel.summary.overallReadiness}%</div>
-                    <div className="text-[6px] font-space-mono text-slate-600">READINESS</div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <span className="text-[7px] font-orbitron px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 border border-amber-500/15">
+                  {aiPathStats.stats?.total_km} km
+                </span>
+                <span className="text-[7px] font-orbitron px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 border border-cyan-500/15">
+                  {aiPathStats.waypoints?.length} WP
+                </span>
+                <span className={`text-[7px] font-orbitron px-2 py-0.5 rounded border ${
+                  aiPathStats.stats?.threat_exposure === "CRITICAL" ? "bg-red-500/10 text-red-400 border-red-500/15" :
+                  aiPathStats.stats?.threat_exposure === "HIGH" ? "bg-orange-500/10 text-orange-400 border-orange-500/15" :
+                  "bg-emerald-500/10 text-emerald-400 border-emerald-500/15"
+                }`}>
+                  {aiPathStats.stats?.threat_exposure}
+                </span>
+                <ChevronDown className={`w-4 h-4 text-amber-400/50 transition-transform duration-300 ml-1 ${showAiAnalysis ? "rotate-180" : ""}`} />
+              </div>
+            </button>
+
+            {/* ── EXPANDABLE CONTENT ── */}
+            {showAiAnalysis && (
+              <div className="bg-slate-900/50 border border-t-0 border-amber-500/15 rounded-b-xl">
+
+                {/* ── ROW 1: STAT CARDS ── */}
+                <div className="p-4 pb-3">
+                  <div className="text-[7px] font-orbitron text-slate-500 tracking-[0.2em] mb-2.5 pl-1">KEY METRICS</div>
+                  <div className="grid grid-cols-4 lg:grid-cols-8 gap-2">
+                    {[
+                      { label: "DISTANCE",   value: `${aiPathStats.stats?.total_km ?? "—"}`,  unit: "km",   color: "#f59e0b", borderC: "#f59e0b" },
+                      { label: "NAUTICAL MI", value: `${aiPathStats.stats?.total_nm ?? "—"}`,  unit: "nm",   color: "#06b6d4", borderC: "#06b6d4" },
+                      { label: "ETA",         value: aiPathStats.stats?.eta ?? "—",            unit: `@${missionProfile.speed}kn`, color: "#06b6d4", borderC: "#06b6d4" },
+                      { label: "WAYPOINTS",   value: `${aiPathStats.waypoints?.length ?? "—"}`, unit: "pts",  color: "#10b981", borderC: "#10b981" },
+                      { label: "PEAK THREAT", value: `${((aiPathStats.stats?.peak_threat || 0) * 100).toFixed(1)}`, unit: "%", color: (aiPathStats.stats?.peak_threat || 0) > 0.7 ? "#ef4444" : "#f59e0b", borderC: (aiPathStats.stats?.peak_threat || 0) > 0.7 ? "#ef4444" : "#f59e0b" },
+                      { label: "SEA STATE",   value: `${aiPathStats.weather?.sea_state ?? "—"}`, unit: `${aiPathStats.weather?.wave_height ?? "—"}m`, color: "#3b82f6", borderC: "#3b82f6" },
+                      { label: "WIND SPEED",  value: `${aiPathStats.weather?.wind_speed ?? "—"}`, unit: "km/h", color: "#3b82f6", borderC: "#3b82f6" },
+                      { label: "GRID",        value: `${aiPathStats.grid_shape?.[0] ?? "—"}×${aiPathStats.grid_shape?.[1] ?? "—"}`, unit: "cells", color: "#94a3b8", borderC: "#94a3b8" },
+                    ].map(s => (
+                      <div key={s.label} className="rounded-lg p-2 text-center" style={{ background: `${s.borderC}08`, border: `1px solid ${s.borderC}25` }}>
+                        <div className="text-sm font-orbitron leading-none" style={{ color: s.color }}>{s.value}</div>
+                        <div className="text-[6px] font-space-mono text-slate-500 mt-1 leading-none">{s.unit}</div>
+                        <div className="text-[5px] font-orbitron text-slate-600 mt-1.5 tracking-[0.1em] leading-none">{s.label}</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* ── ROW 2: RISK PROFILE GRAPH + DONUT ── */}
+                <div className="px-4 pb-3">
+                  <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                    {/* GRAPH 1: Risk Profile Line Chart */}
+                    {(() => {
+                      const segs = aiPathStats.stats?.risk_segments ?? [];
+                      if (segs.length === 0) return null;
+                      const costs: number[] = segs.map((s: any) => typeof s.cost === "number" ? s.cost : parseFloat(s.cost) || 0);
+                      const W = 660, H = 280, PL = 45, PR = 60, PT = 25, PB = 30;
+                      const gW = W - PL - PR, gH = H - PT - PB;
+                      const stepX = gW / Math.max(costs.length - 1, 1);
+                      const rc = (c: number) => c >= 0.85 ? "#ef4444" : c >= 0.6 ? "#f97316" : c >= 0.3 ? "#eab308" : "#10b981";
+                      const pts = costs.map((c, i) => [PL + i * stepX, PT + gH - c * gH]);
+                      const lineD = pts.map((p, i) => `${i === 0 ? "M" : "L"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(" ");
+                      const areaD = lineD + ` L${pts[pts.length - 1][0].toFixed(1)},${(PT + gH).toFixed(1)} L${pts[0][0].toFixed(1)},${(PT + gH).toFixed(1)} Z`;
+                      const labelStep = Math.max(1, Math.ceil(costs.length / 10));
+                      return (
+                        <div className="bg-slate-800/25 border border-amber-500/10 rounded-lg p-4 lg:col-span-2">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <Activity className="w-3.5 h-3.5 text-amber-400" />
+                              <span className="text-[9px] font-orbitron text-amber-400 tracking-[0.15em]">RISK PROFILE ALONG ROUTE</span>
+                            </div>
+                            <span className="text-[7px] font-space-mono text-slate-600">{segs.length} seg · {aiPathStats.stats?.total_km} km</span>
+                          </div>
+                          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+                            <defs>
+                              <linearGradient id="areaG" x1="0" y1="0" x2="0" y2="1">
+                                <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.3" />
+                                <stop offset="100%" stopColor="#f59e0b" stopOpacity="0.02" />
+                              </linearGradient>
+                              <filter id="gl"><feGaussianBlur stdDeviation="1.5" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge></filter>
+                            </defs>
+                            {/* Background risk zones */}
+                            <rect x={PL} y={PT} width={gW} height={gH * 0.15} fill="#ef444408" />
+                            <rect x={PL} y={PT + gH * 0.15} width={gW} height={gH * 0.25} fill="#f9731605" />
+                            {/* Y-axis grid + labels */}
+                            {[0, 0.2, 0.4, 0.6, 0.8, 1.0].map(v => {
+                              const y = PT + gH - v * gH;
+                              return (
+                                <g key={v}>
+                                  <line x1={PL} y1={y} x2={PL + gW} y2={y} stroke="#334155" strokeWidth="0.5" strokeDasharray="3,3" />
+                                  <text x={PL - 5} y={y + 3} textAnchor="end" fill="#64748b" fontSize="8" fontFamily="monospace">{v.toFixed(1)}</text>
+                                </g>
+                              );
+                            })}
+                            {/* Area fill */}
+                            <path d={areaD} fill="url(#areaG)" />
+                            {/* Colored segments */}
+                            {pts.map((p, i) => i > 0 ? (
+                              <line key={i} x1={pts[i-1][0]} y1={pts[i-1][1]} x2={p[0]} y2={p[1]} stroke={rc(costs[i])} strokeWidth="2.5" strokeLinecap="round" />
+                            ) : null)}
+                            {/* Glow */}
+                            <path d={lineD} fill="none" stroke="#f59e0b" strokeWidth="1" opacity="0.25" filter="url(#gl)" />
+                            {/* Data points + labels */}
+                            {pts.map((p, i) => (
+                              <g key={i}>
+                                <circle cx={p[0]} cy={p[1]} r="3.5" fill={rc(costs[i])} stroke="#0f172a" strokeWidth="1.5" />
+                                {(i % labelStep === 0 || i === costs.length - 1) && (
+                                  <text x={p[0]} y={p[1] - 7} textAnchor="middle" fill={rc(costs[i])} fontSize="7" fontFamily="monospace" fontWeight="bold">{costs[i].toFixed(2)}</text>
+                                )}
+                              </g>
+                            ))}
+                            {/* Threshold lines with right-side labels */}
+                            {[[0.85, "#ef4444", "CRITICAL"], [0.6, "#f97316", "HIGH"], [0.3, "#eab308", "MEDIUM"]].map(([v, c, l]) => {
+                              const y = PT + gH - (v as number) * gH;
+                              return (
+                                <g key={l as string}>
+                                  <line x1={PL} y1={y} x2={PL + gW} y2={y} stroke={c as string} strokeWidth="0.7" strokeDasharray="5,3" opacity="0.5" />
+                                  <text x={PL + gW + 4} y={y + 3} fill={c as string} fontSize="6" fontFamily="monospace" opacity="0.6">{l} {(v as number).toFixed(1)}</text>
+                                </g>
+                              );
+                            })}
+                            {/* X-axis labels */}
+                            {pts.map((p, i) => (i % labelStep === 0 || i === costs.length - 1) ? (
+                              <text key={i} x={p[0]} y={PT + gH + 14} textAnchor="middle" fill="#64748b" fontSize="7" fontFamily="monospace">S{i + 1}</text>
+                            ) : null)}
+                            {/* Axis titles */}
+                            <text x={10} y={PT + gH / 2} textAnchor="middle" fill="#94a3b8" fontSize="7" fontFamily="monospace" transform={`rotate(-90, 10, ${PT + gH / 2})`}>COST</text>
+                            <text x={PL + gW / 2} y={H - 5} textAnchor="middle" fill="#94a3b8" fontSize="7" fontFamily="monospace">ROUTE SEGMENT</text>
+                          </svg>
+                        </div>
+                      );
+                    })()}
+
+                    {/* GRAPH 2: Threat Donut */}
+                    {(() => {
+                      const segs = aiPathStats.stats?.risk_segments ?? [];
+                      if (segs.length === 0) return null;
+                      const counts: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+                      const dKm: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+                      segs.forEach((s: any) => { const r = (s.risk || "").toLowerCase(); if (r in counts) { counts[r]++; dKm[r] += parseFloat(s.dist_km) || 0; } });
+                      const total = segs.length || 1;
+                      const R = 58, CX = 75, CY = 75, SW = 16;
+                      const circ = 2 * Math.PI * R;
+                      const colors: Record<string, string> = { low: "#10b981", medium: "#eab308", high: "#f97316", critical: "#ef4444" };
+                      let off = 0;
+                      const arcs = Object.entries(counts).filter(([, v]) => v > 0).map(([k, v]) => {
+                        const pct = v / total;
+                        const dl = circ * pct;
+                        const dg = circ - dl;
+                        const a = { key: k, da: `${dl} ${dg}`, off: -off, color: colors[k], pct: (pct * 100).toFixed(1), count: v };
+                        off += dl;
+                        return a;
+                      });
+                      const totalD = Object.values(dKm).reduce((a, b) => a + b, 0);
+                      return (
+                        <div className="bg-slate-800/25 border border-amber-500/10 rounded-lg p-4 flex flex-col">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Shield className="w-3.5 h-3.5 text-amber-400" />
+                            <span className="text-[9px] font-orbitron text-amber-400 tracking-[0.15em]">THREAT EXPOSURE</span>
+                          </div>
+                          <div className="flex-1 flex items-center justify-center">
+                            <svg viewBox="0 0 150 150" width="150" height="150">
+                              <circle cx={CX} cy={CY} r={R} fill="none" stroke="#1e293b" strokeWidth={SW} />
+                              {arcs.map(a => (
+                                <circle key={a.key} cx={CX} cy={CY} r={R} fill="none" stroke={a.color} strokeWidth={SW}
+                                  strokeDasharray={a.da} strokeDashoffset={a.off}
+                                  strokeLinecap="butt" transform={`rotate(-90 ${CX} ${CY})`} />
+                              ))}
+                              <text x={CX} y={CY - 8} textAnchor="middle" fill="#f59e0b" fontSize="18" fontFamily="Orbitron, monospace" fontWeight="bold">{total}</text>
+                              <text x={CX} y={CY + 4} textAnchor="middle" fill="#94a3b8" fontSize="7" fontFamily="monospace">SEGMENTS</text>
+                              <text x={CX} y={CY + 14} textAnchor="middle" fill="#64748b" fontSize="6" fontFamily="monospace">{totalD.toFixed(0)} km total</text>
+                            </svg>
+                          </div>
+                          {/* Legend rows */}
+                          <div className="mt-3 space-y-1.5">
+                            {arcs.map(a => (
+                              <div key={a.key} className="grid grid-cols-4 items-center text-[7px] font-space-mono gap-1">
+                                <div className="flex items-center gap-1.5 col-span-1">
+                                  <div className="w-2 h-2 rounded-sm flex-shrink-0" style={{ backgroundColor: a.color }} />
+                                  <span className="font-orbitron tracking-wide" style={{ color: a.color }}>{a.key.toUpperCase()}</span>
+                                </div>
+                                <span className="text-slate-400 text-right">{a.count} seg</span>
+                                <span className="text-slate-500 text-right">{a.pct}%</span>
+                                <span className="text-slate-400 text-right">{dKm[a.key].toFixed(0)} km</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* ── ROW 3: BAR CHART + COST ANALYSIS ── */}
+                <div className="px-4 pb-3">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    {/* GRAPH 3: Distance by Risk (Horizontal Bar) */}
+                    {(() => {
+                      const segs = aiPathStats.stats?.risk_segments ?? [];
+                      if (segs.length === 0) return null;
+                      const dKm: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+                      segs.forEach((s: any) => { const r = (s.risk || "").toLowerCase(); if (r in dKm) dKm[r] += parseFloat(s.dist_km) || 0; });
+                      const maxD = Math.max(...Object.values(dKm), 1);
+                      const colors: Record<string, string> = { low: "#10b981", medium: "#eab308", high: "#f97316", critical: "#ef4444" };
+                      const labels: Record<string, string> = { low: "LOW", medium: "MEDIUM", high: "HIGH", critical: "CRITICAL" };
+                      const totalD = Object.values(dKm).reduce((a, b) => a + b, 0);
+                      const W = 480, PL = 65, PR = 80, PT = 15, barH = 22, gap = 12;
+                      const H = PT + 4 * (barH + gap);
+                      const barArea = W - PL - PR;
+                      return (
+                        <div className="bg-slate-800/25 border border-cyan-500/10 rounded-lg p-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <div className="flex items-center gap-2">
+                              <Route className="w-3.5 h-3.5 text-cyan-400" />
+                              <span className="text-[9px] font-orbitron text-cyan-400 tracking-[0.15em]">DISTANCE BY RISK</span>
+                            </div>
+                            <span className="text-[7px] font-space-mono text-slate-600">{totalD.toFixed(0)} km total</span>
+                          </div>
+                          <svg viewBox={`0 0 ${W} ${H}`} className="w-full" preserveAspectRatio="xMidYMid meet">
+                            {Object.entries(dKm).map(([k, v], i) => {
+                              const y = PT + i * (barH + gap);
+                              const bW = maxD > 0 ? (v / maxD) * barArea : 0;
+                              const pct = totalD > 0 ? ((v / totalD) * 100).toFixed(1) : "0";
+                              return (
+                                <g key={k}>
+                                  {/* Label */}
+                                  <text x={PL - 6} y={y + barH / 2 + 1} textAnchor="end" dominantBaseline="middle" fill={colors[k]} fontSize="8" fontFamily="Orbitron, monospace" fontWeight="bold">{labels[k]}</text>
+                                  {/* Bar bg */}
+                                  <rect x={PL} y={y} width={barArea} height={barH} rx="3" fill="#1e293b" opacity="0.3" />
+                                  {/* Bar fill */}
+                                  <rect x={PL} y={y} width={Math.max(bW, 3)} height={barH} rx="3" fill={colors[k]} opacity="0.7" />
+                                  {/* Value */}
+                                  <text x={PL + Math.max(bW, 3) + 6} y={y + barH / 2 - 2} dominantBaseline="middle" fill={colors[k]} fontSize="9" fontFamily="monospace" fontWeight="bold">{v.toFixed(0)} km</text>
+                                  <text x={PL + Math.max(bW, 3) + 6} y={y + barH / 2 + 9} fill="#64748b" fontSize="7" fontFamily="monospace">{pct}%</text>
+                                </g>
+                              );
+                            })}
+                          </svg>
+                        </div>
+                      );
+                    })()}
+
+                    {/* GRAPH 4: Cost Analysis */}
+                    {(() => {
+                      const segs = aiPathStats.stats?.risk_segments ?? [];
+                      if (segs.length === 0) return null;
+                      const costs: number[] = segs.map((s: any) => typeof s.cost === "number" ? s.cost : parseFloat(s.cost) || 0);
+                      const avg = costs.reduce((a, b) => a + b, 0) / costs.length;
+                      const mn = Math.min(...costs), mx = Math.max(...costs);
+                      const sd = Math.sqrt(costs.reduce((a, c) => a + Math.pow(c - avg, 2), 0) / costs.length);
+                      const rc = (c: number) => c >= 0.85 ? "#ef4444" : c >= 0.6 ? "#f97316" : c >= 0.3 ? "#eab308" : "#10b981";
+                      const W = 480, PAD = 10;
+                      const cW = (W - 2 * PAD) / costs.length;
+                      return (
+                        <div className="bg-slate-800/25 border border-emerald-500/10 rounded-lg p-4">
+                          <div className="flex items-center gap-2 mb-3">
+                            <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                            <span className="text-[9px] font-orbitron text-emerald-400 tracking-[0.15em]">COST ANALYSIS</span>
+                          </div>
+                          {/* Heatmap */}
+                          <div className="mb-3">
+                            <div className="text-[6px] font-orbitron text-slate-600 tracking-[0.1em] mb-1">SEGMENT COST HEATMAP</div>
+                            <svg viewBox={`0 0 ${W} 40`} className="w-full" preserveAspectRatio="xMidYMid meet">
+                              {costs.map((c, i) => (
+                                <rect key={i} x={PAD + i * cW} y={4} width={cW + 0.5} height={24} fill={rc(c)} opacity={0.3 + c * 0.7} rx="1" />
+                              ))}
+                              <text x={PAD} y={36} fill="#64748b" fontSize="6" fontFamily="monospace">START</text>
+                              <text x={W - PAD} y={36} fill="#64748b" fontSize="6" fontFamily="monospace" textAnchor="end">GOAL</text>
+                            </svg>
+                          </div>
+                          {/* Stats — 2×2 grid */}
+                          <div className="grid grid-cols-2 gap-1.5 mb-3">
+                            {[
+                              { lbl: "AVG COST",   val: avg.toFixed(4), ic: "●", clr: "#f59e0b" },
+                              { lbl: "PEAK COST",  val: mx.toFixed(4),  ic: "▲", clr: mx >= 0.85 ? "#ef4444" : "#f97316" },
+                              { lbl: "MIN COST",   val: mn.toFixed(4),  ic: "▼", clr: "#10b981" },
+                              { lbl: "STD DEV",    val: sd.toFixed(4),  ic: "σ", clr: "#94a3b8" },
+                            ].map(s => (
+                              <div key={s.lbl} className="bg-slate-900/40 border border-slate-700/15 rounded p-2 flex items-center justify-between">
+                                <span className="text-[6px] font-orbitron text-slate-500 tracking-wide">{s.lbl}</span>
+                                <span className="text-[10px] font-orbitron" style={{ color: s.clr }}>{s.ic} {s.val}</span>
+                              </div>
+                            ))}
+                          </div>
+                          {/* Cost range */}
+                          <div className="bg-slate-900/30 border border-slate-700/10 rounded p-2">
+                            <div className="text-[6px] font-orbitron text-slate-600 tracking-[0.1em] mb-1">COST RANGE</div>
+                            <div className="relative h-2.5 rounded-full overflow-hidden bg-slate-800/50">
+                              <div className="absolute inset-0 flex">
+                                <div className="bg-emerald-500" style={{ width: "30%" }} />
+                                <div className="bg-amber-500" style={{ width: "30%" }} />
+                                <div className="bg-orange-500" style={{ width: "25%" }} />
+                                <div className="bg-red-500" style={{ width: "15%" }} />
+                              </div>
+                              <div className="absolute top-0 bottom-0 w-0.5 bg-white" style={{ left: `${mn * 100}%` }} />
+                              <div className="absolute top-0 bottom-0 w-0.5 bg-amber-300" style={{ left: `${avg * 100}%` }} />
+                              <div className="absolute top-0 bottom-0 w-0.5 bg-white" style={{ left: `${Math.min(mx * 100, 99)}%` }} />
+                            </div>
+                            <div className="flex justify-between mt-1 text-[6px] font-space-mono">
+                              <span className="text-emerald-400">min {mn.toFixed(2)}</span>
+                              <span className="text-amber-400">avg {avg.toFixed(2)}</span>
+                              <span style={{ color: mx >= 0.85 ? "#ef4444" : "#f97316" }}>max {mx.toFixed(2)}</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                {/* ── ROW 4: SEGMENT TABLE + INFO CARDS ── */}
+                <div className="px-4 pb-4">
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                    {/* LEFT: Risk Segments Table */}
+                    <div className="bg-slate-800/25 border border-amber-500/10 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <Shield className="w-3.5 h-3.5 text-amber-400" />
+                          <span className="text-[9px] font-orbitron text-amber-400 tracking-[0.15em]">RISK SEGMENT TABLE</span>
+                        </div>
+                        <span className="text-[7px] font-space-mono text-slate-600">{aiPathStats.stats?.risk_segments?.length ?? 0} segments</span>
+                      </div>
+                      {/* Table */}
+                      <div className="max-h-64 overflow-y-auto plan-scroll">
+                        <table className="w-full text-[7px] font-space-mono">
+                          <thead>
+                            <tr className="text-[6px] font-orbitron text-slate-500 border-b border-slate-700/30">
+                              <th className="text-left py-1.5 pl-2 w-[5%]">#</th>
+                              <th className="text-left py-1.5 w-[25%]">FROM</th>
+                              <th className="text-left py-1.5 w-[25%]">TO</th>
+                              <th className="text-right py-1.5 w-[15%]">DIST</th>
+                              <th className="text-right py-1.5 w-[12%]">COST</th>
+                              <th className="text-right py-1.5 pr-2 w-[18%]">RISK</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(aiPathStats.stats?.risk_segments ?? []).map((seg: any, i: number) => {
+                              const rc2 = (seg.risk || "").toLowerCase();
+                              const clr = rc2 === "critical" ? "text-red-400" : rc2 === "high" ? "text-orange-400" : rc2 === "medium" ? "text-amber-400" : "text-emerald-400";
+                              const bg2 = rc2 === "critical" ? "bg-red-500/10" : rc2 === "high" ? "bg-orange-500/10" : rc2 === "medium" ? "bg-amber-500/10" : "bg-emerald-500/10";
+                              return (
+                                <tr key={i} className={`${i % 2 === 0 ? "bg-slate-800/10" : ""} hover:bg-amber-500/5 cursor-pointer transition-colors`}
+                                  onClick={() => { if (mapRef.current && seg.from) { mapRef.current.flyTo([(seg.from[0] + seg.to[0]) / 2, (seg.from[1] + seg.to[1]) / 2], 7, { duration: 0.8 }); } }}>
+                                  <td className="py-1 pl-2 text-slate-600">{i + 1}</td>
+                                  <td className="py-1 text-slate-400">{seg.from?.[0]?.toFixed(2)}°, {seg.from?.[1]?.toFixed(2)}°</td>
+                                  <td className="py-1 text-slate-400">{seg.to?.[0]?.toFixed(2)}°, {seg.to?.[1]?.toFixed(2)}°</td>
+                                  <td className="py-1 text-right text-slate-300">{seg.dist_km} km</td>
+                                  <td className={`py-1 text-right ${clr}`}>{typeof seg.cost === "number" ? seg.cost.toFixed(2) : seg.cost}</td>
+                                  <td className="py-1 text-right pr-2">
+                                    <span className={`text-[6px] font-orbitron px-1.5 py-0.5 rounded ${bg2} ${clr}`}>
+                                      {(typeof seg.risk === "string" ? seg.risk : "—").toUpperCase()}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      {/* Distribution bar */}
+                      {(() => {
+                        const segs = aiPathStats.stats?.risk_segments ?? [];
+                        const ct: Record<string, number> = { low: 0, medium: 0, high: 0, critical: 0 };
+                        segs.forEach((s: any) => { const r = (s.risk || "").toLowerCase(); if (r in ct) ct[r]++; });
+                        const tot = segs.length || 1;
+                        return (
+                          <div className="mt-3 pt-3 border-t border-slate-700/20">
+                            <div className="text-[6px] font-orbitron text-slate-600 tracking-[0.1em] mb-1.5">DISTRIBUTION</div>
+                            <div className="flex h-2.5 rounded-full overflow-hidden bg-slate-800/40">
+                              {ct.low > 0 && <div className="bg-emerald-500" style={{ width: `${(ct.low / tot) * 100}%` }} />}
+                              {ct.medium > 0 && <div className="bg-amber-500" style={{ width: `${(ct.medium / tot) * 100}%` }} />}
+                              {ct.high > 0 && <div className="bg-orange-500" style={{ width: `${(ct.high / tot) * 100}%` }} />}
+                              {ct.critical > 0 && <div className="bg-red-500" style={{ width: `${(ct.critical / tot) * 100}%` }} />}
+                            </div>
+                            <div className="flex gap-3 mt-1.5">
+                              {Object.entries(ct).filter(([, v]) => v > 0).map(([k, v]) => (
+                                <span key={k} className={`text-[6px] font-space-mono ${
+                                  k === "critical" ? "text-red-400" : k === "high" ? "text-orange-400" : k === "medium" ? "text-amber-400" : "text-emerald-400"
+                                }`}>{k.toUpperCase()} {v}/{tot}</span>
+                              ))}
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+
+                    {/* RIGHT: Info Cards */}
+                    <div className="space-y-3">
+                      {/* Model + Context — side by side */}
+                      <div className="grid grid-cols-2 gap-3">
+                        {/* Model */}
+                        <div className="bg-slate-800/25 border border-amber-500/10 rounded-lg p-3">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <Brain className="w-3 h-3 text-amber-400" />
+                            <span className="text-[8px] font-orbitron text-amber-400 tracking-[0.1em]">MODEL</span>
+                          </div>
+                          <div className={`text-[10px] font-orbitron text-center py-1.5 rounded border mb-2 ${
+                            aiPathStats.model_used === "dyn_cost_net"
+                              ? "bg-amber-500/10 border-amber-500/20 text-amber-400"
+                              : "bg-slate-700/20 border-slate-600/15 text-slate-400"
+                          }`}>
+                            {aiPathStats.model_used === "dyn_cost_net" ? "NEURAL NET" : "EXPERT RULES"}
+                          </div>
+                          <div className="space-y-1">
+                            {[
+                              ["Arch",   aiPathStats.model_used === "dyn_cost_net" ? "ResidualMLP" : "Rule-based"],
+                              ["Feats",  aiPathStats.model_used === "dyn_cost_net" ? "32-dim" : "N/A"],
+                              ["Grid",   `${aiPathStats.grid_shape?.[0]}×${aiPathStats.grid_shape?.[1]}`],
+                              ["A*",     "8-directional"],
+                              ["Smooth", "Catmull-Rom"],
+                            ].map(([l, v]) => (
+                              <div key={l} className="flex justify-between text-[7px] font-space-mono">
+                                <span className="text-slate-500">{l}</span>
+                                <span className="text-slate-400">{v}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Context */}
+                        <div className="bg-slate-800/25 border border-cyan-500/10 rounded-lg p-3">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <Globe2 className="w-3 h-3 text-cyan-400" />
+                            <span className="text-[8px] font-orbitron text-cyan-400 tracking-[0.1em]">CONTEXT</span>
+                          </div>
+                          <div className="space-y-1">
+                            {[
+                              ["Season",  aiPathStats.context?.season ?? "—",         "text-cyan-300/80"],
+                              ["Month",   `${aiPathStats.context?.month ?? "—"}`,     "text-cyan-300/80"],
+                              ["UTC",     `${aiPathStats.context?.utc_hour ?? "—"}:00`, "text-cyan-300/80"],
+                              ["Ops",     (aiPathStats.context?.utc_hour ?? 12) >= 20 || (aiPathStats.context?.utc_hour ?? 12) < 6 ? "NIGHT ●" : "DAY ○",
+                                          (aiPathStats.context?.utc_hour ?? 12) >= 20 || (aiPathStats.context?.utc_hour ?? 12) < 6 ? "text-emerald-400" : "text-amber-400"],
+                              ["Sea",     `${aiPathStats.weather?.sea_state ?? "—"} (${aiPathStats.weather?.wave_height ?? "—"}m)`, "text-cyan-300/80"],
+                              ["Wind",    `${aiPathStats.weather?.wind_speed ?? "—"} km/h`, "text-cyan-300/80"],
+                              ["Vis",     `${aiPathStats.weather?.visibility ?? "—"} km`, "text-cyan-300/80"],
+                            ].map(([l, v, c]) => (
+                              <div key={l as string} className="flex justify-between text-[7px] font-space-mono">
+                                <span className="text-slate-500">{l}</span>
+                                <span className={c as string}>{v}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Vessel */}
+                      <div className="bg-slate-800/25 border border-emerald-500/10 rounded-lg p-3">
+                        <div className="flex items-center gap-1.5 mb-2">
+                          <Anchor className="w-3 h-3 text-emerald-400" />
+                          <span className="text-[8px] font-orbitron text-emerald-400 tracking-[0.1em]">VESSEL & MISSION</span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-2 mb-2">
+                          {[
+                            [`${missionProfile.speed}`, "SPEED KN"],
+                            [`${missionProfile.crew}`, "CREW"],
+                            [missionProfile.displacement, "DISPL"],
+                          ].map(([v, l]) => (
+                            <div key={l} className="bg-slate-800/30 rounded p-1.5 text-center">
+                              <div className="text-[10px] font-orbitron text-emerald-400 leading-none">{v}</div>
+                              <div className="text-[5px] font-orbitron text-slate-600 mt-1 tracking-wide">{l}</div>
+                            </div>
+                          ))}
+                        </div>
+                        <div className="space-y-0.5 text-[7px] font-space-mono">
+                          <div className="flex justify-between"><span className="text-slate-500">Vessel</span><span className="text-slate-300">{missionProfile.vessel}</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">Type</span><span className="text-emerald-300 uppercase">{missionProfile.type}</span></div>
+                          <div className="flex justify-between"><span className="text-slate-500">Arms</span><span className="text-slate-400 text-right max-w-[60%]">{missionProfile.armament}</span></div>
+                        </div>
+                      </div>
+
+                      {/* Route Comparison */}
+                      {waypoints.length >= 2 && (
+                        <div className="bg-slate-800/25 border border-cyan-500/10 rounded-lg p-3">
+                          <div className="flex items-center gap-1.5 mb-2">
+                            <Route className="w-3 h-3 text-cyan-400" />
+                            <span className="text-[8px] font-orbitron text-cyan-400 tracking-[0.1em]">ROUTE COMPARISON</span>
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mb-2">
+                            <div className="text-center bg-cyan-500/5 rounded p-2">
+                              <div className="text-[6px] font-orbitron text-cyan-400/60 mb-0.5">MANUAL</div>
+                              <div className="text-sm font-orbitron text-cyan-400 leading-none">{routeStats.distance} nm</div>
+                              <div className="text-[7px] font-space-mono text-slate-500 mt-1">{routeStats.eta}</div>
+                              <div className="text-[6px] font-space-mono text-slate-600">{waypoints.length} WP</div>
+                            </div>
+                            <div className="text-center bg-amber-500/5 rounded p-2">
+                              <div className="text-[6px] font-orbitron text-amber-400/60 mb-0.5">AI ROUTE</div>
+                              <div className="text-sm font-orbitron text-amber-400 leading-none">{aiPathStats.stats?.total_nm} nm</div>
+                              <div className="text-[7px] font-space-mono text-slate-500 mt-1">{aiPathStats.stats?.eta}</div>
+                              <div className="text-[6px] font-space-mono text-slate-600">{aiPathStats.waypoints?.length} WP</div>
+                            </div>
+                          </div>
+                          {(() => {
+                            const mNm = routeStats.distance;
+                            const aNm = aiPathStats.stats?.total_nm ?? 0;
+                            const d = aNm - mNm;
+                            const p = mNm > 0 ? ((d / mNm) * 100).toFixed(1) : "0";
+                            return (
+                              <div className="pt-2 border-t border-slate-700/15 text-center">
+                                <span className={`text-[7px] font-orbitron ${d > 0 ? "text-amber-400" : "text-emerald-400"}`}>
+                                  AI is {Math.abs(d)} nm {d > 0 ? "LONGER" : "SHORTER"} ({p}%)
+                                </span>
+                                <div className="text-[6px] font-space-mono text-slate-600 mt-0.5">
+                                  {d > 0 ? "Avoids threat zones — tactical advantage" : "More efficient path found"}
+                                </div>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      )}
+
+                      {/* Risk Legend */}
+                      <div className="bg-slate-800/25 border border-slate-500/10 rounded-lg p-3">
+                        <div className="text-[6px] font-orbitron text-slate-500 tracking-[0.15em] mb-2">RISK LEVELS</div>
+                        <div className="grid grid-cols-4 gap-2">
+                          {[
+                            { r: "LOW",      c: "#10b981", rng: "0 – 0.3",   d: "Safe" },
+                            { r: "MEDIUM",   c: "#eab308", rng: "0.3 – 0.6", d: "Elevated" },
+                            { r: "HIGH",     c: "#f97316", rng: "0.6 – 0.85",d: "Threat" },
+                            { r: "CRITICAL", c: "#ef4444", rng: "0.85 – 1.0",d: "Danger" },
+                          ].map(x => (
+                            <div key={x.r} className="text-center">
+                              <div className="w-full h-1.5 rounded-full mb-1" style={{ backgroundColor: x.c }} />
+                              <div className="text-[7px] font-orbitron" style={{ color: x.c }}>{x.r}</div>
+                              <div className="text-[6px] font-space-mono text-slate-600">{x.rng}</div>
+                              <div className="text-[5px] font-space-mono text-slate-700">{x.d}</div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
             )}
           </div>
-        </div>
+        )}
       </div>
-
       {/* @ts-ignore */}
       <style dangerouslySetInnerHTML={{ __html: `
         .plan-scroll::-webkit-scrollbar { width: 2px; }

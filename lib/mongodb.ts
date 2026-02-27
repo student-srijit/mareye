@@ -3,11 +3,8 @@ import mongoose from "mongoose";
 import type { Db } from "mongodb";
 
 const MONGODB_URI = process.env.MONGODB_URI;
-if (!MONGODB_URI) {
-  throw new Error(
-    "Please define the MONGODB_URI environment variable inside .env.local"
-  );
-}
+const MONGODB_URI_FALLBACK =
+  process.env.MONGODB_URI_FALLBACK || "mongodb://127.0.0.1:27017/mareye";
 
 /**
  * Remove unsupported query params from Mongo URI (e.g. tlsMinVersion)
@@ -32,52 +29,82 @@ function stripUnsupportedMongoOptions(uri: string) {
   return keep.length ? `${base}?${keep.join("&")}` : base;
 }
 
-/* Use cleaned URI to avoid unsupported option errors */
-const CLEANED_MONGODB_URI = stripUnsupportedMongoOptions(MONGODB_URI);
+function getCandidateMongoUris(): string[] {
+  const uris = [MONGODB_URI, MONGODB_URI_FALLBACK]
+    .filter((value): value is string => Boolean(value && value.trim()))
+    .map((value) => stripUnsupportedMongoOptions(value.trim()));
+
+  return [...new Set(uris)];
+}
 
 interface GlobalWithMongoose {
   mongoose?: {
     conn: typeof mongoose | null;
     promise: Promise<typeof mongoose> | null;
+    connectedUri?: string | null;
   };
 }
 declare const global: GlobalWithMongoose;
 
 if (!global.mongoose) {
-  global.mongoose = { conn: null, promise: null };
+  global.mongoose = { conn: null, promise: null, connectedUri: null };
 }
 const cached = global.mongoose;
 
 async function connectDB() {
   if (cached.conn) return cached.conn;
 
-  if (!cached.promise) {
-    // minimal, safe options — don't force TLS options in the URI or here
-    const opts = {
-      bufferCommands: false,
-      serverSelectionTimeoutMS: 30000,
-      connectTimeoutMS: 30000,
-      socketTimeoutMS: 30000,
-      maxPoolSize: 10,
-      minPoolSize: 1,
-    } as mongoose.ConnectOptions;
-
-    // avoid deprecation warnings
-    mongoose.set("strictQuery", true);
-
-    cached.promise = mongoose.connect(CLEANED_MONGODB_URI, opts);
+  const candidates = getCandidateMongoUris();
+  if (candidates.length === 0) {
+    throw new Error(
+      "Please define MONGODB_URI or MONGODB_URI_FALLBACK inside .env.local"
+    );
   }
 
-  try {
-    cached.conn = await cached.promise;
-    console.log("✅ MongoDB connected successfully");
-  } catch (e) {
-    cached.promise = null;
-    console.error("❌ MongoDB connection error:", e);
-    throw e;
+  // minimal, safe options — don't force TLS options in the URI or here
+  const opts = {
+    bufferCommands: false,
+    serverSelectionTimeoutMS: 30000,
+    connectTimeoutMS: 30000,
+    socketTimeoutMS: 30000,
+    maxPoolSize: 10,
+    minPoolSize: 1,
+  } as mongoose.ConnectOptions;
+
+  // avoid deprecation warnings
+  mongoose.set("strictQuery", true);
+
+  let lastError: unknown = null;
+
+  for (const uri of candidates) {
+    if (!cached.promise || cached.connectedUri !== uri) {
+      cached.promise = mongoose.connect(uri, opts);
+      cached.connectedUri = uri;
+    }
+
+    try {
+      cached.conn = await cached.promise;
+      const isLocal = uri.includes("127.0.0.1") || uri.includes("localhost");
+      console.log(
+        `✅ MongoDB connected successfully${isLocal ? " (local fallback)" : ""}`
+      );
+      return cached.conn;
+    } catch (e) {
+      lastError = e;
+      cached.promise = null;
+      cached.connectedUri = null;
+      cached.conn = null;
+      console.error("❌ MongoDB connection error:", e);
+      try {
+        await mongoose.disconnect();
+      } catch {
+        // ignore disconnect errors while failing over
+      }
+    }
   }
 
-  return cached.conn;
+  throw lastError;
+
 }
 
 /** Backwards-compatible helpers some examples use */

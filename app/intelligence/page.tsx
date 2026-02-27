@@ -25,6 +25,7 @@ import {
   Navigation,
   Compass,
   Globe,
+  Globe2,
   ChevronDown,
   ChevronUp,
   Loader2,
@@ -35,6 +36,7 @@ import {
   Target,
   BarChart3,
 } from "lucide-react";
+import { GlobeWarRoom } from "@/components/globe-war-room";
 
 interface ZoneData {
   id: string;
@@ -206,7 +208,7 @@ export default function IntelligencePage() {
   const [selectedZone, setSelectedZone] = useState<string | null>(null);
   const [showBrief, setShowBrief] = useState(false);
   const [activeTab, setActiveTab] = useState<
-    "overview" | "zones" | "ops" | "brief"
+    "overview" | "zones" | "ops" | "brief" | "war-room"
   >("overview");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const briefRef = useRef<HTMLPreElement>(null);
@@ -341,13 +343,15 @@ export default function IntelligencePage() {
         {/* ═══════════════ TAB BAR ═══════════════ */}
         <div className="flex justify-center mb-8">
           <div className="inline-flex rounded-lg border border-cyan-500/30 bg-slate-900/80 backdrop-blur-sm p-1 gap-1">
-            {(["overview", "zones", "ops", "brief"] as const).map((tab) => (
+            {(["overview", "zones", "ops", "brief", "war-room"] as const).map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 className={`px-4 py-2 rounded-md font-orbitron text-xs uppercase tracking-wider transition-all duration-300 ${
                   activeTab === tab
-                    ? "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-lg shadow-cyan-500/10"
+                    ? tab === "war-room"
+                      ? "bg-amber-500/20 text-amber-300 border border-amber-500/40 shadow-lg shadow-amber-500/10"
+                      : "bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 shadow-lg shadow-cyan-500/10"
                     : "text-cyan-500/50 hover:text-cyan-400 hover:bg-slate-800/50"
                 }`}
               >
@@ -359,7 +363,10 @@ export default function IntelligencePage() {
                 {tab === "brief" && (
                   <FileText className="w-3 h-3 inline mr-2" />
                 )}
-                {tab}
+                {tab === "war-room" && (
+                  <Globe2 className="w-3 h-3 inline mr-2" />
+                )}
+                {tab === "war-room" ? "WAR ROOM" : tab}
               </button>
             ))}
           </div>
@@ -1094,6 +1101,13 @@ export default function IntelligencePage() {
                 </Card>
               ))}
             </div>
+          </div>
+        )}
+
+        {/* ═══════════════ WAR ROOM TAB ═══════════════ */}
+        {activeTab === "war-room" && (
+          <div className="animate-in fade-in duration-500 -mx-4 sm:-mx-6 lg:-mx-8">
+            <GlobeWarRoom />
           </div>
         )}
       </div>

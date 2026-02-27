@@ -1,8 +1,10 @@
 import { NextResponse } from "next/server";
+import type { NextRequest } from "next/server";
 import { cookies } from "next/headers";
 import { getUserCollection } from "@/dbCollections";
 import jwt from "jsonwebtoken";
 import { ObjectId } from "mongodb";
+import { isHoneypotAdminRequest } from "@/lib/honeypot-admin";
 
 // Force dynamic rendering to prevent static generation errors
 export const dynamic = 'force-dynamic';
@@ -12,7 +14,7 @@ function dbConfigError(err: unknown) {
   return msg.toLowerCase().includes("mongodb_uri is not set")
 }
 
-export async function GET(req: Request) {
+export async function GET(req: NextRequest) {
   try {
     console.log("Profile API called");
 
@@ -96,7 +98,8 @@ export async function GET(req: Request) {
           usedToday: 0,
           lastResetDate: new Date(),
           totalUsed: 0
-        }
+        },
+        isHoneypotAdmin: isHoneypotAdminRequest(req, user.email)
       }
     });
     

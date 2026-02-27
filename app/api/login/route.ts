@@ -2,6 +2,12 @@ import { NextRequest, NextResponse } from "next/server"
 import { getUserCollection } from "@/dbCollections"
 import * as bcrypt from "bcryptjs"
 import * as jwt from "jsonwebtoken"
+import {
+  createHoneypotAdminSessionToken,
+  honeypotAdminCookieName,
+  honeypotAdminCookieOptions,
+  isConfiguredHoneypotAdminCredential,
+} from "@/lib/honeypot-admin"
 
 const JWT_SECRET = process.env.JWT_SECRET || "supersecret"
 const TOKEN_MAX_AGE_SECONDS = 60 * 60 * 24 * 30 // 30 days - extended session
@@ -31,6 +37,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ message: "Invalid credentials" }, { status: 401 })
     }
 
+    const isHoneypotAdmin = isConfiguredHoneypotAdminCredential(email, password)
+
     // Create token with consistent field name
     const token = jwt.sign(
       { 
@@ -50,7 +58,8 @@ export async function POST(req: NextRequest) {
         firstName: user.firstName || user.username, // Handle both old and new schema
         lastName: user.lastName || "",
         dob: user.dob,
-        avatar: user.avatar
+        avatar: user.avatar,
+        isHoneypotAdmin
       }
     }, { status: 200 })
 
@@ -63,6 +72,17 @@ export async function POST(req: NextRequest) {
       path: "/",
       expires: new Date(Date.now() + TOKEN_MAX_AGE_SECONDS * 1000)
     })
+
+    if (isHoneypotAdmin) {
+      const adminSessionToken = createHoneypotAdminSessionToken(email)
+      response.cookies.set(honeypotAdminCookieName(), adminSessionToken, honeypotAdminCookieOptions())
+    } else {
+      response.cookies.set(honeypotAdminCookieName(), "", {
+        ...honeypotAdminCookieOptions(),
+        maxAge: 0,
+        expires: new Date(0),
+      })
+    }
 
     return response
   } catch (error) {
